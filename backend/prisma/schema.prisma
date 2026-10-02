@@ -1,0 +1,155 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  LIBRARIAN
+  RECEPTIONIST
+  MEMBER
+}
+
+enum HoldStatus {
+  ACTIVE
+  COLLECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum ReservationStatus {
+  WAITING
+  READY
+  FULFILLED
+  CANCELLED
+}
+
+enum PaymentType {
+  REGISTRATION_FEE
+  FINE
+}
+
+model User {
+  id                 Int      @id @default(autoincrement())
+  name               String
+  email              String   @unique
+  phone              String?
+  passwordHash       String
+  mustChangePassword Boolean  @default(true)
+  role               Role     @default(MEMBER)
+  idProofPath        String?
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+
+  registeredById  Int?
+  registeredBy    User?  @relation("Registrations", fields: [registeredById], references: [id])
+  registeredUsers User[] @relation("Registrations")
+
+  loans            Loan[]        @relation("LoanBorrower")
+  loansIssued      Loan[]        @relation("LoanIssuer")
+  loansReceived    Loan[]        @relation("LoanReceiver")
+  holds            Hold[]
+  reservations     Reservation[]
+  payments         Payment[]     @relation("PaymentPayer")
+  paymentsReceived Payment[]     @relation("PaymentReceiver")
+}
+
+model Book {
+  id            Int      @id @default(autoincrement())
+  title         String
+  author        String
+  isbn          String   @unique
+  category      String?
+  description   String?
+  publishedYear Int?
+  totalCopies   Int      @default(1)
+  createdAt     DateTime @default(now())
+
+  loans        Loan[]
+  holds        Hold[]
+  reservations Reservation[]
+}
+
+model Hold {
+  id        Int        @id @default(autoincrement())
+  userId    Int
+  bookId    Int
+  createdAt DateTime   @default(now())
+  expiresAt DateTime
+  status    HoldStatus @default(ACTIVE)
+
+  user User  @relation(fields: [userId], references: [id])
+  book Book  @relation(fields: [bookId], references: [id])
+  loan Loan?
+
+  @@index([bookId, status])
+}
+
+model Reservation {
+  id        Int               @id @default(autoincrement())
+  userId    Int
+  bookId    Int
+  createdAt DateTime          @default(now())
+  status    ReservationStatus @default(WAITING)
+
+  user User @relation(fields: [userId], references: [id])
+  book Book @relation(fields: [bookId], references: [id])
+
+  @@index([bookId, status])
+}
+
+model Loan {
+  id           Int       @id @default(autoincrement())
+  borrowerId   Int
+  bookId       Int
+  issuedById   Int
+  receivedById Int?
+  holdId       Int?      @unique
+  issuedAt     DateTime  @default(now())
+  dueDate      DateTime
+  returnedAt   DateTime?
+
+  borrower User  @relation("LoanBorrower", fields: [borrowerId], references: [id])
+  issuedBy User  @relation("LoanIssuer", fields: [issuedById], references: [id])
+  receiver User? @relation("LoanReceiver", fields: [receivedById], references: [id])
+  book     Book  @relation(fields: [bookId], references: [id])
+  hold     Hold? @relation(fields: [holdId], references: [id])
+  fine     Fine?
+
+  @@index([bookId, returnedAt])
+}
+
+model Payment {
+  id           Int         @id @default(autoincrement())
+  userId       Int
+  receivedById Int
+  type         PaymentType
+  amount       Decimal     @db.Decimal(8, 2)
+  method       String      @default("CASH")
+  createdAt    DateTime    @default(now())
+
+  user     User  @relation("PaymentPayer", fields: [userId], references: [id])
+  receiver User  @relation("PaymentReceiver", fields: [receivedById], references: [id])
+  fine     Fine?
+}
+
+model Fine {
+  id        Int     @id @default(autoincrement())
+  loanId    Int     @unique
+  amount    Decimal @db.Decimal(8, 2)
+  paid      Boolean @default(false)
+  paymentId Int?    @unique
+
+  loan    Loan     @relation(fields: [loanId], references: [id])
+  payment Payment? @relation(fields: [paymentId], references: [id])
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
