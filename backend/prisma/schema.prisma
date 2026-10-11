@@ -7,11 +7,19 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum Role {
-  ADMIN
-  LIBRARIAN
-  RECEPTIONIST
-  MEMBER
+enum ItemType {
+  BOOK
+  JOURNAL
+  MAGAZINE
+  NEWSPAPER
+  RARE
+}
+
+enum RevokeReason {
+  INDISCIPLINE
+  OVERDUE
+  LOST
+  DAMAGED
 }
 
 enum HoldStatus {
@@ -28,26 +36,59 @@ enum ReservationStatus {
   CANCELLED
 }
 
-enum PaymentType {
-  REGISTRATION_FEE
-  FINE
+enum LoanStatus {
+  ACTIVE
+  RETURNED
+  LOST
+  LOST_PAID
+}
+
+enum FineType {
+  OVERDUE
+  LOST_BOOK
+  DAMAGE
+}
+
+model Role {
+  id            Int     @id @default(autoincrement())
+  name          String  @unique
+  rank          Int     @unique
+  grantedByRank Int
+  canBorrow     Boolean @default(false)
+  maxBooks      Int     @default(0)
+  loanDays      Int     @default(0)
+
+  users         User[]       @relation("UserRole")
+  previousUsers User[]       @relation("UserPreviousRole")
+  changesFrom   RoleChange[] @relation("ChangeFrom")
+  changesTo     RoleChange[] @relation("ChangeTo")
 }
 
 model User {
-  id                 Int      @id @default(autoincrement())
-  name               String
-  email              String   @unique
-  phone              String?
-  passwordHash       String
-  mustChangePassword Boolean  @default(true)
-  role               Role     @default(MEMBER)
-  idProofPath        String?
-  isActive           Boolean  @default(true)
-  createdAt          DateTime @default(now())
+  id            Int      @id @default(autoincrement())
+  name          String
+  email         String   @unique
+  passwordHash  String?
+  institutionId String?
+  department    String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
 
-  registeredById  Int?
-  registeredBy    User?  @relation("Registrations", fields: [registeredById], references: [id])
-  registeredUsers User[] @relation("Registrations")
+  roleId Int?
+  role   Role? @relation("UserRole", fields: [roleId], references: [id])
+
+  verifiedById  Int?
+  verifiedBy    User?     @relation("Verification", fields: [verifiedById], references: [id])
+  verifiedUsers User[]    @relation("Verification")
+  verifiedAt    DateTime?
+
+  previousRoleId Int?
+  previousRole   Role?          @relation("UserPreviousRole", fields: [previousRoleId], references: [id])
+  revokedUntil   DateTime?
+  revokeReason   RevokeReason?
+  revokedById    Int?
+  revokedBy      User?          @relation("Revocation", fields: [revokedById], references: [id])
+  revokedUsers   User[]         @relation("Revocation")
 
   loans            Loan[]        @relation("LoanBorrower")
   loansIssued      Loan[]        @relation("LoanIssuer")
@@ -56,16 +97,36 @@ model User {
   reservations     Reservation[]
   payments         Payment[]     @relation("PaymentPayer")
   paymentsReceived Payment[]     @relation("PaymentReceiver")
+  roleChanges      RoleChange[]  @relation("ChangeTarget")
+  roleChangesMade  RoleChange[]  @relation("ChangeActor")
+}
+
+model RoleChange {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  fromRoleId  Int?
+  toRoleId    Int?
+  changedById Int?
+  reason      String?
+  createdAt   DateTime @default(now())
+
+  user      User  @relation("ChangeTarget", fields: [userId], references: [id])
+  changedBy User? @relation("ChangeActor", fields: [changedById], references: [id])
+  fromRole  Role? @relation("ChangeFrom", fields: [fromRoleId], references: [id])
+  toRole    Role? @relation("ChangeTo", fields: [toRoleId], references: [id])
 }
 
 model Book {
   id            Int      @id @default(autoincrement())
   title         String
   author        String
-  isbn          String   @unique
+  isbn          String?  @unique
+  itemType      ItemType @default(BOOK)
+  isIssuable    Boolean  @default(true)
   category      String?
   description   String?
   publishedYear Int?
+  price         Decimal? @db.Decimal(10, 2)
   totalCopies   Int      @default(1)
   createdAt     DateTime @default(now())
 
@@ -75,12 +136,14 @@ model Book {
 }
 
 model Hold {
-  id        Int        @id @default(autoincrement())
-  userId    Int
-  bookId    Int
-  createdAt DateTime   @default(now())
-  expiresAt DateTime
-  status    HoldStatus @default(ACTIVE)
+  id              Int        @id @default(autoincrement())
+  userId          Int
+  bookId          Int
+  createdAt       DateTime   @default(now())
+  expiresAt       DateTime
+  status          HoldStatus @default(ACTIVE)
+  reminderSentAt  DateTime?
+  expiredNoticeAt DateTime?
 
   user User  @relation(fields: [userId], references: [id])
   book Book  @relation(fields: [bookId], references: [id])
@@ -90,11 +153,12 @@ model Hold {
 }
 
 model Reservation {
-  id        Int               @id @default(autoincrement())
-  userId    Int
-  bookId    Int
-  createdAt DateTime          @default(now())
-  status    ReservationStatus @default(WAITING)
+  id         Int               @id @default(autoincrement())
+  userId     Int
+  bookId     Int
+  createdAt  DateTime          @default(now())
+  status     ReservationStatus @default(WAITING)
+  notifiedAt DateTime?
 
   user User @relation(fields: [userId], references: [id])
   book Book @relation(fields: [bookId], references: [id])
@@ -103,46 +167,54 @@ model Reservation {
 }
 
 model Loan {
-  id           Int       @id @default(autoincrement())
-  borrowerId   Int
-  bookId       Int
-  issuedById   Int
-  receivedById Int?
-  holdId       Int?      @unique
-  issuedAt     DateTime  @default(now())
-  dueDate      DateTime
-  returnedAt   DateTime?
+  id               Int        @id @default(autoincrement())
+  borrowerId       Int
+  bookId           Int
+  issuedById       Int
+  receivedById     Int?
+  holdId           Int?       @unique
+  issuedAt         DateTime   @default(now())
+  dueDate          DateTime
+  returnedAt       DateTime?
+  status           LoanStatus @default(ACTIVE)
+  renewalCount     Int        @default(0)
+  conditionNote    String?
+  reminderSentAt   DateTime?
+  lastFineNoticeAt DateTime?
 
-  borrower User  @relation("LoanBorrower", fields: [borrowerId], references: [id])
-  issuedBy User  @relation("LoanIssuer", fields: [issuedById], references: [id])
-  receiver User? @relation("LoanReceiver", fields: [receivedById], references: [id])
-  book     Book  @relation(fields: [bookId], references: [id])
-  hold     Hold? @relation(fields: [holdId], references: [id])
-  fine     Fine?
+  borrower   User   @relation("LoanBorrower", fields: [borrowerId], references: [id])
+  issuedBy   User   @relation("LoanIssuer", fields: [issuedById], references: [id])
+  receivedBy User?  @relation("LoanReceiver", fields: [receivedById], references: [id])
+  book       Book   @relation(fields: [bookId], references: [id])
+  hold       Hold?  @relation(fields: [holdId], references: [id])
+  fines      Fine[]
 
-  @@index([bookId, returnedAt])
+  @@index([bookId, status])
+  @@index([borrowerId, status])
 }
 
 model Payment {
-  id           Int         @id @default(autoincrement())
+  id           Int      @id @default(autoincrement())
   userId       Int
   receivedById Int
-  type         PaymentType
-  amount       Decimal     @db.Decimal(8, 2)
-  method       String      @default("CASH")
-  createdAt    DateTime    @default(now())
+  amount       Decimal  @db.Decimal(8, 2)
+  method       String   @default("CASH")
+  createdAt    DateTime @default(now())
 
-  user     User  @relation("PaymentPayer", fields: [userId], references: [id])
-  receiver User  @relation("PaymentReceiver", fields: [receivedById], references: [id])
-  fine     Fine?
+  user     User   @relation("PaymentPayer", fields: [userId], references: [id])
+  receiver User   @relation("PaymentReceiver", fields: [receivedById], references: [id])
+  fines    Fine[]
 }
 
 model Fine {
-  id        Int     @id @default(autoincrement())
-  loanId    Int     @unique
-  amount    Decimal @db.Decimal(8, 2)
-  paid      Boolean @default(false)
-  paymentId Int?    @unique
+  id        Int      @id @default(autoincrement())
+  loanId    Int
+  type      FineType
+  amount    Decimal  @db.Decimal(8, 2)
+  note      String?
+  paid      Boolean  @default(false)
+  paymentId Int?
+  createdAt DateTime @default(now())
 
   loan    Loan     @relation(fields: [loanId], references: [id])
   payment Payment? @relation(fields: [paymentId], references: [id])
