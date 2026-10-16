@@ -8,7 +8,7 @@ const router = express.Router();
 
 // Password login. Only accounts that have a password (the Admin) can use it.
 // Everyone else will sign in with Google.
-router.post("/login", async (req, res) => {
+router.post("/admin/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
