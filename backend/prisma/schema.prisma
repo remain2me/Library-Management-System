@@ -124,7 +124,7 @@ model Book {
   itemType      ItemType @default(BOOK)
   isIssuable    Boolean  @default(true)
   category      String?
-  description   String?
+  overview      String?
   publishedYear Int?
   price         Decimal? @db.Decimal(10, 2)
   totalCopies   Int      @default(1)

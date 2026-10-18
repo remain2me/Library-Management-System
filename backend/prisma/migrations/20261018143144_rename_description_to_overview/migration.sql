@@ -1,0 +1,1 @@
+   ALTER TABLE "Book" RENAME COLUMN "description" TO "overview";
