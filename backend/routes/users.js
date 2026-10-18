@@ -127,3 +127,192 @@ router.patch("/:id/role", ...staffOnly, assignRole);
 router.patch("/:id/verify", ...staffOnly, assignRole);
 
 module.exports = router;
+
+// ---------- REVOKE ----------
+
+const REVOKE_REASONS = ["INDISCIPLINE", "OVERDUE", "LOST", "DAMAGED"];
+
+// Read "MIN_REVOKE_DAYS" from the Setting table (7 if missing)
+async function getMinRevokeDays() {
+  const setting = await prisma.setting.findUnique({ where: { key: "MIN_REVOKE_DAYS" } });
+  const n = Number(setting && setting.value);
+  return Number.isFinite(n) ? n : 7;
+}
+
+// "2026-11-05" means the END of that day in India. A full date-time is used as given.
+function parseEndDate(value) {
+  if (!value) return null;
+  const text = String(value).trim();
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(text)
+    ? new Date(text + "T23:59:59+05:30")
+    : new Date(text);
+  return isNaN(date.getTime()) ? null : date;
+}
+
+// Revoke someone (punishment role)
+router.post("/:id/revoke", ...staffOnly, async (req, res) => {
+  try {
+    const targetId = Number(req.params.id);
+    const { reason, endDate, note } = req.body;
+
+    if (!Number.isInteger(targetId)) {
+      return res.status(400).json({ message: "Invalid user id" });
+    }
+    if (!REVOKE_REASONS.includes(reason)) {
+      return res.status(400).json({ message: "Reason must be one of: " + REVOKE_REASONS.join(", ") });
+    }
+
+    const end = parseEndDate(endDate);
+    if (!end) {
+      return res.status(400).json({ message: "A valid endDate is required (for example 2026-11-05)" });
+    }
+    const minDays = await getMinRevokeDays();
+    const earliest = new Date(Date.now() + minDays * 24 * 60 * 60 * 1000);
+    if (end < earliest) {
+      return res.status(400).json({ message: "A revocation must last at least " + minDays + " days" });
+    }
+
+    const target = await prisma.user.findUnique({
+      where: { id: targetId },
+      include: { role: true },
+    });
+    if (!target) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    if (target.id === req.user.id) {
+      return res.status(403).json({ message: "You cannot revoke yourself" });
+    }
+    if (!target.role) {
+      return res.status(400).json({ message: "This person has no role yet, so there is nothing to revoke" });
+    }
+    if (target.role.name === "ADMIN") {
+      return res.status(403).json({ message: "The Admin account cannot be revoked" });
+    }
+    if (target.role.name === "REVOKED") {
+      return res.status(400).json({ message: "This person is already revoked. You can extend the revocation instead" });
+    }
+    // Librarians can only revoke members (Faculty and below). Only the Admin can revoke a Librarian.
+    if (req.user.role !== "ADMIN" && target.role.rank < 3) {
+      return res.status(403).json({ message: "You are not allowed to revoke this person" });
+    }
+
+    const revokedRole = await prisma.role.findFirst({ where: { name: "REVOKED" } });
+    if (!revokedRole) {
+      return res.status(500).json({ message: "The Revoked role is missing. Run the seed script" });
+    }
+
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: targetId },
+        data: {
+          roleId: revokedRole.id,
+          previousRoleId: target.roleId,
+          revokedUntil: end,
+          revokeReason: reason,
+          revokedById: req.user.id,
+        },
+      }),
+      // Cancel their holds and take them out of every queue
+      prisma.hold.updateMany({
+        where: { userId: targetId, status: "ACTIVE" },
+        data: { status: "CANCELLED" },
+      }),
+      prisma.reservation.updateMany({
+        where: { userId: targetId, status: { in: ["WAITING", "READY"] } },
+        data: { status: "CANCELLED" },
+      }),
+      prisma.roleChange.create({
+        data: {
+          userId: targetId,
+          fromRoleId: target.roleId,
+          toRoleId: revokedRole.id,
+          changedById: req.user.id,
+          reason: "Revoked (" + reason + ")" + (note ? ": " + String(note).trim() : ""),
+        },
+      }),
+    ]);
+
+    res.json({
+      message: "User revoked",
+      user: { id: target.id, name: target.name, email: target.email, role: "REVOKED", revokedUntil: end, reason },
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
+// Extend a revocation (set a later end date)
+router.patch("/:id/revoke", ...staffOnly, async (req, res) => {
+  try {
+    const targetId = Number(req.params.id);
+    const { endDate, note } = req.body;
+
+    if (!Number.isInteger(targetId)) {
+      return res.status(400).json({ message: "Invalid user id" });
+    }
+    const end = parseEndDate(endDate);
+    if (!end) {
+      return res.status(400).json({ message: "A valid endDate is required (for example 2026-11-05)" });
+    }
+
+    const target = await prisma.user.findUnique({
+      where: { id: targetId },
+      include: { role: true, previousRole: true },
+    });
+    if (!target) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    if (!target.role || target.role.name !== "REVOKED") {
+      return res.status(400).json({ message: "This person is not revoked" });
+    }
+    // Librarians can only extend revocations on members
+    if (req.user.role !== "ADMIN" && target.previousRole && target.previousRole.rank < 3) {
+      return res.status(403).json({ message: "You are not allowed to change this revocation" });
+    }
+    if (target.revokedUntil && end <= target.revokedUntil) {
+      return res.status(400).json({ message: "The new end date must be later than the current one" });
+    }
+
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: targetId }, data: { revokedUntil: end } }),
+      prisma.roleChange.create({
+        data: {
+          userId: targetId,
+          fromRoleId: target.roleId,
+          toRoleId: target.roleId,
+          changedById: req.user.id,
+          reason: "Revocation extended" + (note ? ": " + String(note).trim() : ""),
+        },
+      }),
+    ]);
+
+    res.json({ message: "Revocation extended", revokedUntil: end });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
+// Everyone who is currently revoked
+router.get("/revoked", ...staffOnly, async (req, res) => {
+  try {
+    const users = await prisma.user.findMany({
+      where: { role: { name: "REVOKED" } },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        revokeReason: true,
+        revokedUntil: true,
+        previousRole: { select: { name: true } },
+        revokedBy: { select: { name: true } },
+      },
+      orderBy: { revokedUntil: "asc" },
+    });
+    res.json({ users });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Something went wrong" });
+  }
+});
