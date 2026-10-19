@@ -17,7 +17,7 @@ async function overviewWithTimeout(book) {
     timer = setTimeout(() => resolve(null), OVERVIEW_TIMEOUT_MS);
   });
   try {
-    return await Promise.race([
+        const text = await Promise.race([
       generateBookOverview({
         title: book.title,
         author: book.author,
@@ -26,6 +26,7 @@ async function overviewWithTimeout(book) {
       }),
       timeout,
     ]);
+    return text ? text.replace(/\*/g, "").trim() : null;
   } catch {
     return null;
   } finally {
